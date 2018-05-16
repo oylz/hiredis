@@ -84,14 +84,16 @@ void freeReplyObject(void *reply) {
     case REDIS_REPLY_ARRAY:
         if (r->element != NULL) {
             for (j = 0; j < r->elements; j++)
-                freeReplyObject(r->element[j]);
+                if (r->element[j] != NULL)
+                    freeReplyObject(r->element[j]);
             free(r->element);
         }
         break;
     case REDIS_REPLY_ERROR:
     case REDIS_REPLY_STATUS:
     case REDIS_REPLY_STRING:
-        free(r->str);
+        if (r->str != NULL)
+            free(r->str);
         break;
     }
     free(r);
@@ -216,7 +218,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     int totlen = 0;
     int error_type = 0; /* 0 = no error; -1 = memory error; -2 = format error */
     int j;
-
+	int quote = 0;
     /* Abort if there is not target to set */
     if (target == NULL)
         return -1;
@@ -229,7 +231,13 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     while(*c != '\0') {
         if (*c != '%' || c[1] == '\0') {
             if (*c == ' ') {
-                if (touched) {
+		if (quote){  
+                    newarg = sdscatlen(curarg, c, 1);  
+                    if (newarg == NULL) goto memory_err;  
+                    curarg = newarg;  
+                    touched = 1;  
+                }  
+                else if (touched) {
                     newargv = realloc(curargv,sizeof(char*)*(argc+1));
                     if (newargv == NULL) goto memory_err;
                     curargv = newargv;
@@ -242,9 +250,22 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
                     touched = 0;
                 }
             } else {
-                newarg = sdscatlen(curarg,c,1);
-                if (newarg == NULL) goto memory_err;
-                curarg = newarg;
+		if (*c == '"')  
+                {  
+                    if (!quote)  
+                    {  
+                        quote = 1;  
+                    }  
+                    else  
+                    {  
+                        quote = 0;  
+                    }  
+                } 
+		else{ 
+                    newarg = sdscatlen(curarg,c,1);
+                    if (newarg == NULL) goto memory_err;
+               	    curarg = newarg;
+		}
                 touched = 1;
             }
         } else {
@@ -430,7 +451,11 @@ cleanup:
     }
 
     sdsfree(curarg);
-    free(cmd);
+
+    /* No need to check cmd since it is the last statement that can fail,
+     * but do it anyway to be as defensive as possible. */
+    if (cmd != NULL)
+        free(cmd);
 
     return error_type;
 }
@@ -575,7 +600,7 @@ void __redisSetError(redisContext *c, int type, const char *str) {
     } else {
         /* Only REDIS_ERR_IO may lack a description! */
         assert(type == REDIS_ERR_IO);
-        strerror_r(errno, c->errstr, sizeof(c->errstr));
+        __redis_strerror_r(errno, c->errstr, sizeof(c->errstr));
     }
 }
 
@@ -590,8 +615,14 @@ static redisContext *redisContextInit(void) {
     if (c == NULL)
         return NULL;
 
+    c->err = 0;
+    c->errstr[0] = '\0';
     c->obuf = sdsempty();
     c->reader = redisReaderCreate();
+    c->tcp.host = NULL;
+    c->tcp.source_addr = NULL;
+    c->unix_sock.path = NULL;
+    c->timeout = NULL;
 
     if (c->obuf == NULL || c->reader == NULL) {
         redisFree(c);
@@ -606,12 +637,18 @@ void redisFree(redisContext *c) {
         return;
     if (c->fd > 0)
         close(c->fd);
-    sdsfree(c->obuf);
-    redisReaderFree(c->reader);
-    free(c->tcp.host);
-    free(c->tcp.source_addr);
-    free(c->unix_sock.path);
-    free(c->timeout);
+    if (c->obuf != NULL)
+        sdsfree(c->obuf);
+    if (c->reader != NULL)
+        redisReaderFree(c->reader);
+    if (c->tcp.host)
+        free(c->tcp.host);
+    if (c->tcp.source_addr)
+        free(c->tcp.source_addr);
+    if (c->unix_sock.path)
+        free(c->unix_sock.path);
+    if (c->timeout)
+        free(c->timeout);
     free(c);
 }
 
